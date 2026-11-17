@@ -1,9 +1,7 @@
-# 4X4 Android Dialer — experimental source
+# K-Dial Diagnostics v3
 
-Target device: Samsung Galaxy Tab A9+ 5G SM-X216B.
+Android source project, not a compiled APK. Includes Bluetooth SDP UUIDs, bonded devices, public profile proxy connection states, Android audio device routing, communication device, mic RMS test (no audio saved), local tone test, optional SCO routing attempt, RFCOMM HFP/HSP tests, and safe AT commands.
 
-This is **source code**, not a ready APK. Build with Android Studio (JDK 17, Android SDK 35). Open project directory, allow Gradle sync, then Build > Build APK(s). Android Studio may offer to install SDK components. No Gradle wrapper binary is bundled.
+**Limitations:** Android ordinary apps cannot force HFP Client or SCO audio to an external phone. SCO test only uses Android public audio routing and does not establish HFP by itself. AT commands require RFCOMM connection. Never run a live call test without confirming the intended number. Microphone test does not save or upload audio.
 
-Pair 4X4 in Android Bluetooth settings, grant Nearby Devices permission, refresh paired devices, select the 4X4, connect, and inspect the log. You can attempt dialing only after connection succeeds. RFCOMM connection to an HFP AG is not guaranteed on stock Android: Android's system Bluetooth stack may own the HFP Client role, reject the connection, or require privileged permissions. HFP audio/SCO is **not implemented**. Do not mistake an RFCOMM connection or ATD success for working audio.
-
-No proprietary CallCenter libraries used. This prototype does not install drivers, root the tablet, or change system Bluetooth settings. Use only with your own phone/SIM and test calls with consent. 
+Build in Android Studio; no APK has been built or device tested here.

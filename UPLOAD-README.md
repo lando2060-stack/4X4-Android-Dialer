@@ -1,0 +1,1 @@
+Upload the CONTENTS of this directory (not the ZIP) to the GitHub repository root. Preserve folders. GitHub Actions workflow builds debug APK. The diagnostic v3 extends the first app and retains dial/hangup UI. Audio call routing is NOT implemented.
