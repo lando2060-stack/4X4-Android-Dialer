@@ -133,9 +133,9 @@ public class MainActivity extends Activity {
    s.connect();if(stop){s.close();return;}
    synchronized(connectionLock){output=s.getOutputStream();connected=true;}
    note("RFCOMM מחובר. מנסה AT handshake");
-   InputStream input=s.getInputStream();Thread reader=new Thread(()->{try{byte[] buffer=new byte[1024];int count;while(!stop&&(count=input.read(buffer))!=-1)String response=new String(buffer,0,count,StandardCharsets.US_ASCII).replace("\r"," ").trim();note("תגובה: "+response);
+   InputStream input=s.getInputStream();Thread reader=new Thread(()->{try{byte[] buffer=new byte[1024];int count;while(!stop&&(count=input.read(buffer))!=-1){String response=new String(buffer,0,count,StandardCharsets.US_ASCII).replace("\r"," ").trim();note("תגובה: "+response);
     if(response.contains("+CIEV:"))note("אירוע שינוי מצב HFP: "+response);
-    if(response.contains("RING"))note("שיחה נכנסת מזוהה");}catch(IOException e){if(!stop)note("קריאה הסתיימה: "+e.getMessage());}});reader.start();
+    if(response.contains("RING"))note("שיחה נכנסת מזוהה");}}catch(IOException e){if(!stop)note("קריאה הסתיימה: "+e.getMessage());}});reader.start();
    sendInternal("AT+BRSF=0");Thread.sleep(500);sendInternal("AT+CIND=?");Thread.sleep(500);sendInternal("AT+CIND?");Thread.sleep(500);sendInternal("AT+CMER=3,0,0,1");
   }catch(Exception e){if(!stop)note("ניסיון חיבור נכשל: "+e.getClass().getSimpleName()+": "+e.getMessage());}
   finally{if(s!=null&&!connected){try{s.close();}catch(Exception ignored){}}}
