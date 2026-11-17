@@ -320,7 +320,19 @@ input[type=checkbox]{accent-color:var(--primary);width:18px;height:18px}
   <div class="panel"><div class="settinggrid">
    <div class="setting"><strong><span data-ic="flag"></span>ניהול סטטוסים</strong><small>הוסף, ערוך ומחק סטטוסים המשמשים בשיחות ובאנשי קשר.</small><div class="toolbar"><button class="btn primary" onclick="openModal('statuses')">ניהול סטטוסים</button></div><div id="statusPreview" class="labels"></div></div>
    <div class="setting"><strong><span data-ic="tag"></span>ניהול תוויות</strong><small>צור קבוצות אנשי קשר והשתמש בהן לרשימות חיוג.</small><div class="toolbar"><button class="btn primary" onclick="openModal('labels')">ניהול תוויות</button></div><div id="labelPreview" class="labels"></div></div>
-   <div class="setting"><strong><span data-ic="bluetooth"></span>חיבור טלפון</strong><small id="connSettings">Bluetooth HFP</small></div>
+   <div class="setting" style="display:block"><strong><span data-ic="bluetooth"></span>חיבור לטלפון הכשר</strong><small id="connSettings">Bluetooth HFP</small>
+    <div style="margin-top:14px;display:grid;gap:10px;max-width:600px">
+      <label for="btDeviceList" style="font-weight:600">בחר טלפון מצומד</label>
+      <select id="btDeviceList" style="width:100%;padding:12px;border:1px solid #cbd5e1;border-radius:9px;background:white;color:#14253c"><option value="">טוען מכשירים...</option></select>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button type="button" class="mini" onclick="kdialRefreshDevices()">סריקת מכשירים מצומדים</button>
+        <button type="button" class="mini" onclick="kdialConnectSelected()">התחבר לטלפון</button>
+        <button type="button" class="mini" onclick="kdialDisconnect()">נתק</button>
+      </div>
+      <small id="btConnectionMessage" role="status">כדי שהטלפון יופיע, יש לצמד אותו תחילה בהגדרות Bluetooth של הטאבלט.</small>
+      <button type="button" class="mini" onclick="kdialCheckConnection()">בדיקת מצב חיבור</button>
+    </div>
+   </div>
    <div class="setting"><strong><span data-ic="link"></span>Webhooks ו־API מקומי</strong><small>הגדרות החיבור יתווספו בגרסה הבאה.</small></div>
   </div></div>
  </section>
@@ -518,6 +530,14 @@ new MutationObserver(()=>{const m=$('modalroot');if(!m.firstChild)return;const f
  window.kdialRequestConnect=()=>native.command(++seq,'connect','');
  setInterval(()=>native.command(0,'status',''),2500);native.command(0,'status','');
 })();
+</script>
+<script>
+window.kdialDevices=function(items){var list=document.getElementById('btDeviceList');if(!list)return;var previous=list.value;list.innerHTML='';if(!items||!items.length){var empty=document.createElement('option');empty.value='';empty.textContent='לא נמצאו מכשירים מצומדים';list.appendChild(empty);}else{items.forEach(function(d){var o=document.createElement('option');o.value=String(d.index);o.textContent=(d.name||'מכשיר ללא שם')+' ('+d.address+')';list.appendChild(o);});var preferred=items.find(function(d){return /4X4/i.test(d.name||'');});list.value=items.some(function(d){return String(d.index)===previous;})?previous:String((preferred||items[0]).index);}var msg=document.getElementById('btConnectionMessage');if(msg)msg.textContent=(items?items.length:0)+' מכשירים מצומדים נמצאו. בחר טלפון ולחץ התחבר.';};
+function kdialInfo(s){var m=document.getElementById('btConnectionMessage');if(m)m.textContent=s;}
+function kdialRefreshDevices(){kdialInfo('מעדכן רשימת מכשירים...');if(window.KDialAndroid)window.KDialAndroid.command(0,'refresh','');else kdialInfo('החיבור ל-Android אינו זמין');}
+function kdialConnectSelected(){var v=document.getElementById('btDeviceList').value;if(v===''){kdialInfo('בחר מכשיר מצומד לפני התחברות');return;}kdialInfo('מתחבר לטלפון...');if(window.KDialAndroid)window.KDialAndroid.command(0,'connectSelected',v);else kdialInfo('החיבור ל-Android אינו זמין');}
+function kdialDisconnect(){if(window.KDialAndroid){window.KDialAndroid.command(0,'disconnect','');kdialInfo('בוצע ניתוק');}}
+function kdialCheckConnection(){if(window.KDialAndroid)window.KDialAndroid.command(0,'status','');else kdialInfo('החיבור ל-Android אינו זמין');}
 </script>
 </body>
 </html>
