@@ -1,147 +1,60 @@
 package com.example.fourxfourdialer;
 
 import android.Manifest;
-import android.app.Activity;
+import android.app.*;
 import android.bluetooth.*;
 import android.content.*;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.os.*;
-import android.text.InputType;
-import android.view.View;
+import android.view.*;
+import android.webkit.*;
 import android.widget.*;
-import android.media.*;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 public class MainActivity extends Activity {
- private static final UUID HFP_AG=UUID.fromString("0000111f-0000-1000-8000-00805f9b34fb");
- private static final UUID HSP_AG=UUID.fromString("00001112-0000-1000-8000-00805f9b34fb");
- private AudioManager audio; private AudioRecord recorder; private BluetoothAdapter adapter; private BluetoothSocket socket; private OutputStream output;
- private volatile boolean connected=false; private volatile boolean stop=false;
- private BluetoothDevice selected; private TextView log; private EditText number; private Spinner devices;
- private final ArrayList<BluetoothDevice> paired=new ArrayList<>();
+ private static final UUID HFP=UUID.fromString("0000111f-0000-1000-8000-00805f9b34fb");
  private final Handler ui=new Handler(Looper.getMainLooper());
- private final Object connectionLock=new Object();
- private volatile int lastCall=-1, lastCallSetup=-1;
- private final BroadcastReceiver scoReceiver=new BroadcastReceiver(){
-  @Override public void onReceive(Context context,Intent intent){
-   if(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED.equals(intent.getAction()))
-    note("SCO broadcast: state="+intent.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_STATE,-1)+" previous="+intent.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_PREVIOUS_STATE,-1));
-  }
- };
- private final BroadcastReceiver sdpReceiver=new BroadcastReceiver(){
-  @Override public void onReceive(Context context,Intent intent){
-   if(!BluetoothDevice.ACTION_UUID.equals(intent.getAction()))return;
-   BluetoothDevice device;
-   if(Build.VERSION.SDK_INT>=33)device=intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE,BluetoothDevice.class);
-   else device=intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
-   if(device==null||selected==null||!device.getAddress().equals(selected.getAddress()))return;
-   android.os.Parcelable[] values=intent.getParcelableArrayExtra(BluetoothDevice.EXTRA_UUID);
-   note("SDP: התקבלה תשובה"+(values==null?" (ללא רשימה)":"; שירותים: "+values.length));
-   if(values!=null)for(android.os.Parcelable p:values)note("UUID: "+p.toString());
-   note("הערה: שירותים שלא פורסמו ב-SDP לא יופיעו ברשימה");
-  }
- };
- private void note(String s){ui.post(()->{if(log!=null){log.append(s+"\n");}});}
- private void add(LinearLayout r,String label,Runnable action){Button b=new Button(this);b.setText(label);r.addView(b);b.setOnClickListener(v->action.run());}
+ private BluetoothAdapter adapter; private BluetoothSocket socket; private OutputStream output;
+ private volatile boolean connected=false,stopping=false,busy=false;
+ private final Object lock=new Object();
+ private WebView web; private Spinner devices; private TextView status; private final ArrayList<BluetoothDevice> paired=new ArrayList<>();
+ private ValueCallback<Uri[]> uploadCallback;
+ private void log(String s){android.util.Log.i("KDial",s);ui.post(()->{if(status!=null)status.setText(s);});}
+ private void js(String code){ui.post(()->{if(web!=null)web.evaluateJavascript(code,null);});}
+ private void reply(int id,boolean ok,String message){if(id>0)js("window.kdialReply("+id+","+ok+","+org.json.JSONObject.quote(message)+")");}
+ private void report(){js("window.kdialStatus("+connected+","+busy+","+org.json.JSONObject.quote(connected?"HFP RFCOMM מחובר":"בחר טלפון ולחץ התחבר")+")");}
  @Override public void onCreate(Bundle b){super.onCreate(b);getWindow().getDecorView().setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
-  LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setPadding(20,16,20,16);
-  TextView title=new TextView(this);title.setText("K-Dial | אבחון וחיוג v4");title.setTextSize(22);root.addView(title);
-  devices=new Spinner(this);root.addView(devices);
-  add(root,"רענון מכשירים",this::refresh);
-  add(root,"בדיקת שירותי Bluetooth (SDP)",this::discover);
-  add(root,"אבחון מלא: מערכת, פרופילים ושמע",this::diagnose);
-  add(root,"בדיקת נתיבי שמע",this::audioRoutes);
-  add(root,"בדיקת מיקרופון (3 שניות)",this::micTest);
-  add(root,"השמעת צליל בדיקה",this::toneTest);
-  add(root,"ניסיון SCO שמע Bluetooth (10 שניות)",this::scoTest);
-  add(root,"בדיקת פקודות AT ללא חיוג",this::atTest);
-  add(root,"בדיקת מצב שיחה (CLCC)",()->send("AT+CLCC"));
-  add(root,"בדיקת יכולות HFP",this::hfpCapabilities);
-  add(root,"בדיקת נתיבי תקשורת זמינים",this::communicationRoutes);
-  add(root,"בדיקת SCO ומצב שמע",this::scoTest);
-  add(root,"מענה לשיחה נכנסת",()->send("ATA"));
-  add(root,"בדיקת HFP מאובטח",()->connect(HFP_AG,false));
-  add(root,"בדיקת HFP לא מאובטח",()->connect(HFP_AG,true));
-  add(root,"בדיקת Headset מאובטח",()->connect(HSP_AG,false));
-  number=new EditText(this);number.setHint("מספר לחיוג (רק אחרי חיבור)");number.setInputType(InputType.TYPE_CLASS_PHONE);root.addView(number);
-  add(root,"חייג (שיחת אמת)",()->{String n=number.getText().toString().trim();if(!n.matches("[0-9+*#]{2,25}")){note("מספר לא תקין");return;}
-   new android.app.AlertDialog.Builder(this).setTitle("חיוג אמיתי").setMessage("לבצע שיחה דרך 4X4 למספר "+n+"?").setNegativeButton("ביטול",null).setPositiveButton("חייג",(dialog,which)->send("ATD"+n+";")).show();});
-  add(root,"נתק שיחה",()->send("AT+CHUP"));add(root,"סגור חיבור",this::disconnect);
-  add(root,"העתק יומן",()->{android.content.ClipboardManager cm=(android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE);cm.setPrimaryClip(ClipData.newPlainText("K-Dial diagnostic",log.getText()));Toast.makeText(this,"היומן הועתק",Toast.LENGTH_SHORT).show();});
-  TextView warning=new TextView(this);warning.setText("גרסת אבחון וחיוג ניסיונית. חיוג אמיתי רק באישור. שמע HFP/SCO דרך הטאבלט עדיין לא ממומש, ותלוי בתמיכת Android.");root.addView(warning);
-  ScrollView scroll=new ScrollView(this);log=new TextView(this);log.setTextIsSelectable(true);scroll.addView(log);root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));setContentView(root);
-  audio=(AudioManager)getSystemService(AUDIO_SERVICE); BluetoothManager manager=(BluetoothManager)getSystemService(BLUETOOTH_SERVICE);adapter=manager==null?null:manager.getAdapter();
-  IntentFilter filter=new IntentFilter(BluetoothDevice.ACTION_UUID);
-  if(Build.VERSION.SDK_INT>=33)registerReceiver(sdpReceiver,filter,Context.RECEIVER_NOT_EXPORTED);else registerReceiver(sdpReceiver,filter);
-  IntentFilter scoFilter=new IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED);
-  if(Build.VERSION.SDK_INT>=33)registerReceiver(scoReceiver,scoFilter,Context.RECEIVER_NOT_EXPORTED);else registerReceiver(scoReceiver,scoFilter);
-  if(Build.VERSION.SDK_INT>=31&&!permitted())requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT,Manifest.permission.RECORD_AUDIO},10);else refresh();
+  BluetoothManager manager=(BluetoothManager)getSystemService(BLUETOOTH_SERVICE);adapter=manager==null?null:manager.getAdapter();
+  LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);
+  LinearLayout bar=new LinearLayout(this);bar.setOrientation(LinearLayout.HORIZONTAL);bar.setPadding(6,4,6,4);
+  devices=new Spinner(this);bar.addView(devices,new LinearLayout.LayoutParams(0,-2,1));
+  Button refresh=new Button(this);refresh.setText("רענן");bar.addView(refresh);refresh.setOnClickListener(v->refresh());
+  Button connect=new Button(this);connect.setText("התחבר");bar.addView(connect);connect.setOnClickListener(v->connect(0));
+  Button disconnect=new Button(this);disconnect.setText("נתק");bar.addView(disconnect);disconnect.setOnClickListener(v->disconnect());root.addView(bar);
+  status=new TextView(this);status.setText("ממתין לחיבור Bluetooth");status.setPadding(12,3,12,3);root.addView(status);
+  web=new WebView(this);web.getSettings().setJavaScriptEnabled(true);web.getSettings().setDomStorageEnabled(true);
+  web.getSettings().setAllowFileAccess(false);web.getSettings().setAllowContentAccess(true);
+  web.addJavascriptInterface(new Bridge(),"KDialAndroid");
+  web.setWebViewClient(new WebViewClient(){@Override public boolean shouldOverrideUrlLoading(WebView view,WebResourceRequest request){return !"file".equalsIgnoreCase(request.getUrl().getScheme());}});
+  web.setWebChromeClient(new WebChromeClient(){@Override public boolean onShowFileChooser(WebView v,ValueCallback<Uri[]> cb,FileChooserParams params){if(uploadCallback!=null)uploadCallback.onReceiveValue(null);uploadCallback=cb;try{startActivityForResult(params.createIntent(),1001);return true;}catch(Exception e){uploadCallback=null;return false;}}});
+  root.addView(web,new LinearLayout.LayoutParams(-1,0,1));setContentView(root);
+  web.loadUrl("file:///android_asset/index.html");
+  if(Build.VERSION.SDK_INT>=31&&!permitted())requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT},10);else refresh();
  }
- private void diagnose(){
-  note("--- מערכת ---");note("יצרן: "+Build.MANUFACTURER+" דגם: "+Build.MODEL+" SDK: "+Build.VERSION.SDK_INT);
-  note("Bluetooth: "+(adapter==null?"לא קיים":adapter.isEnabled()?"פעיל":"כבוי"));
-  note("הרשאת Bluetooth: "+permitted()+"; הרשאת מיקרופון: "+micPermitted());
-  BluetoothDevice d=choice();if(d!=null){try{note("יעד: "+d.getName()+" "+d.getAddress()+" bond="+d.getBondState()+" type="+d.getType());android.os.ParcelUuid[] u=d.getUuids();if(u!=null)for(android.os.ParcelUuid x:u)note("שירות שמור: "+x);else note("אין UUID שמורים");}catch(Exception e){note("יעד: "+e);}}
-  if(adapter!=null&&permitted())for(int profile:new int[]{BluetoothProfile.HEADSET,BluetoothProfile.A2DP,BluetoothProfile.HEALTH,BluetoothProfile.GATT}){
-   try{boolean requested=adapter.getProfileProxy(this,new BluetoothProfile.ServiceListener(){
-    public void onServiceConnected(int p,BluetoothProfile proxy){try{note("פרופיל "+p+" מחובר למכשירים: "+proxy.getConnectedDevices().size());for(BluetoothDevice bd:proxy.getConnectedDevices())note("פרופיל "+p+": "+bd.getName()+" "+bd.getAddress());}catch(Exception e){note("פרופיל "+p+" שגיאה: "+e);}finally{adapter.closeProfileProxy(p,proxy);}}
-    public void onServiceDisconnected(int p){note("פרופיל "+p+" נותק");}},profile);note("בקשת פרופיל "+profile+": "+requested);}catch(Exception e){note("פרופיל "+profile+": "+e);}}
-  audioRoutes();communicationRoutes();discover();
- }
- private boolean micPermitted(){return Build.VERSION.SDK_INT<23||checkSelfPermission(Manifest.permission.RECORD_AUDIO)==PackageManager.PERMISSION_GRANTED;}
- private void audioRoutes(){if(audio==null){note("אין AudioManager");return;}note("--- שמע ---");
-  note("מצב שמע: "+audio.getMode()+"; מוסיקה פעילה: "+audio.isMusicActive()+"; SCO פעיל: "+audio.isBluetoothScoOn());
-  if(Build.VERSION.SDK_INT>=23)for(AudioDeviceInfo d:audio.getDevices(AudioManager.GET_DEVICES_ALL))note("נתיב: "+d.getProductName()+" type="+d.getType()+" source="+d.isSource()+" sink="+d.isSink());
-  if(Build.VERSION.SDK_INT>=31){AudioDeviceInfo dev=audio.getCommunicationDevice();note("נתיב תקשורת: "+(dev==null?"אין":dev.getProductName()+" type="+dev.getType()));}
- }
- private void communicationRoutes(){
-  if(audio==null)return;
-  note("--- נתיבי תקשורת זמינים ---");
-  if(Build.VERSION.SDK_INT>=31){
-   for(AudioDeviceInfo d:audio.getAvailableCommunicationDevices())note("תקשורת: "+d.getProductName()+" type="+d.getType()+" id="+d.getId());
-   AudioDeviceInfo active=audio.getCommunicationDevice();note("נתיב נבחר: "+(active==null?"אין":active.getProductName()));
-  }else note("getAvailableCommunicationDevices זמין מ-Android 12");
-  note("SCO off-call available: "+audio.isBluetoothScoAvailableOffCall());
- }
- private void hfpCapabilities(){
-  if(!connected){note("יש להתחבר קודם ב-HFP מאובטח");return;}
-  new Thread(()->{for(String cmd:new String[]{"AT+BRSF=0","AT+CIND=?","AT+CIND?","AT+CMER=3,0,0,1","AT+CLCC","AT+CHLD=?","AT+COPS?","AT+CNUM"}){
-   try{sendInternal(cmd);Thread.sleep(550);}catch(Exception e){note("יכולות HFP: "+e);break;}
-  }}).start();
- }
- private void micTest(){if(!micPermitted()){note("נדרשת הרשאת מיקרופון; בקש בהגדרות האפליקציה");return;}
-  new Thread(()->{int rate=16000;int min=AudioRecord.getMinBufferSize(rate,AudioFormat.CHANNEL_IN_MONO,AudioFormat.ENCODING_PCM_16BIT);if(min<=0){note("מיקרופון: גודל מאגר לא תקין "+min);return;}AudioRecord r=null;
-   try{r=new AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION,rate,AudioFormat.CHANNEL_IN_MONO,AudioFormat.ENCODING_PCM_16BIT,Math.max(min,2048));recorder=r;if(r.getState()!=AudioRecord.STATE_INITIALIZED){note("המיקרופון לא אותחל");return;}r.startRecording();short[] b=new short[1024];long sum=0,count=0;long end=System.currentTimeMillis()+3000;while(System.currentTimeMillis()<end){int n=r.read(b,0,b.length);if(n>0){for(int i=0;i<n;i++){sum+=(long)b[i]*b[i];}count+=n;}else{note("שגיאת קריאה מהמיקרופון: "+n);break;}}AudioDeviceInfo routed=r.getRoutedDevice();note("מיקרופון נותב אל: "+(routed==null?"לא ידוע":routed.getProductName()+" type="+routed.getType()));
-    note("מיקרופון VOICE_COMMUNICATION: RMS="+(count==0?"אין דגימות":String.format(java.util.Locale.US,"%.1f",Math.sqrt((double)sum/count)))+"; דגימות="+count);}
-   catch(Exception e){note("מיקרופון: "+e);}finally{if(r!=null){try{r.stop();}catch(Exception ignored){}r.release();}recorder=null;}
-  }).start();}
- private void toneTest(){new Thread(()->{ToneGenerator t=null;try{t=new ToneGenerator(AudioManager.STREAM_MUSIC,65);t.startTone(ToneGenerator.TONE_PROP_BEEP,700);Thread.sleep(850);note("צליל נשלח; בדוק מאיזה רמקול נשמע");}catch(Exception e){note("צליל: "+e);}finally{if(t!=null)t.release();}}).start();}
- private void scoTest(){if(audio==null)return;note("ניסיון SCO; אין הבטחה שהמערכת תאפשר חיבור לטלפון");new Thread(()->{try{if(Build.VERSION.SDK_INT>=31){AudioDeviceInfo target=null;for(AudioDeviceInfo d:audio.getAvailableCommunicationDevices())if(d.getType()==AudioDeviceInfo.TYPE_BLUETOOTH_SCO){target=d;break;}if(target==null){note("אין התקן Bluetooth SCO זמין לניתוב תקשורת");return;}boolean ok=audio.setCommunicationDevice(target);note("setCommunicationDevice SCO: "+ok);audioRoutes();Thread.sleep(10000);audioRoutes();audio.clearCommunicationDevice();}
-  else{audio.startBluetoothSco();Thread.sleep(1500);note("SCO לאחר בקשה: "+audio.isBluetoothScoOn());audioRoutes();Thread.sleep(8500);audio.stopBluetoothSco();}note("בדיקת SCO הסתיימה");}catch(Exception e){note("SCO: "+e);}}).start();}
- private void atTest(){new Thread(()->{for(String c:new String[]{"AT","AT+BRSF?","AT+CIND?","AT+CLCC","AT+CSQ"}){try{sendInternal(c);Thread.sleep(350);}catch(Exception e){note("AT: "+e.getMessage());break;}}}).start();}
+ @Override protected void onActivityResult(int request,int result,Intent data){super.onActivityResult(request,result,data);if(request==1001&&uploadCallback!=null){uploadCallback.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(result,data));uploadCallback=null;}}
  private boolean permitted(){return Build.VERSION.SDK_INT<31||checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)==PackageManager.PERMISSION_GRANTED;}
- @Override public void onRequestPermissionsResult(int req,String[] permissions,int[] grants){super.onRequestPermissionsResult(req,permissions,grants);if(req==10){if(permitted())refresh();else note("נדרשת הרשאת מכשירים בקרבת מקום");if(!micPermitted())note("הרשאת מיקרופון לא ניתנה");}}
- private void refresh(){if(adapter==null){note("אין מתאם Bluetooth");return;}if(!permitted()){note("אין הרשאת Bluetooth");return;}paired.clear();ArrayList<String> names=new ArrayList<>();try{for(BluetoothDevice d:adapter.getBondedDevices()){paired.add(d);names.add(d.getName()+" ("+d.getAddress()+")");}}catch(SecurityException e){note(e.toString());}devices.setAdapter(new ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,names));note("מכשירים מצומדים: "+paired.size());}
- private BluetoothDevice choice(){if(!permitted()){note("אין הרשאה");return null;}int i=devices.getSelectedItemPosition();if(i<0||i>=paired.size()){note("בחר מכשיר מצומד");return null;}return paired.get(i);}
- private void discover(){BluetoothDevice d=choice();if(d==null)return;selected=d;try{android.os.ParcelUuid[] cached=d.getUuids();note("UUID שמורים במטמון: "+(cached==null?"אין":cached.length));if(cached!=null)for(android.os.ParcelUuid u:cached)note("מטמון: "+u);boolean started=d.fetchUuidsWithSdp();note("בקשת SDP נשלחה: "+started+"; המתן לתוצאה");}catch(Exception e){note("SDP נכשל: "+e.getMessage());}}
- private void connect(UUID uuid,boolean insecure){BluetoothDevice d=choice();if(d==null)return;disconnect();stop=false;note("מנסה "+uuid+(insecure?" ללא הצפנת RFCOMM":" עם RFCOMM מאובטח"));new Thread(()->{
-  BluetoothSocket s=null;
-  try{s=insecure?d.createInsecureRfcommSocketToServiceRecord(uuid):d.createRfcommSocketToServiceRecord(uuid);
-   synchronized(connectionLock){socket=s;}
-   s.connect();if(stop){s.close();return;}
-   synchronized(connectionLock){output=s.getOutputStream();connected=true;}
-   note("RFCOMM מחובר. מנסה AT handshake");
-   InputStream input=s.getInputStream();Thread reader=new Thread(()->{try{byte[] buffer=new byte[1024];int count;while(!stop&&(count=input.read(buffer))!=-1){String response=new String(buffer,0,count,StandardCharsets.US_ASCII).replace("\r"," ").trim();note("תגובה: "+response);
-    if(response.contains("+CIEV:"))note("אירוע שינוי מצב HFP: "+response);
-    if(response.contains("RING"))note("שיחה נכנסת מזוהה");}}catch(IOException e){if(!stop)note("קריאה הסתיימה: "+e.getMessage());}});reader.start();
-   sendInternal("AT+BRSF=0");Thread.sleep(500);sendInternal("AT+CIND=?");Thread.sleep(500);sendInternal("AT+CIND?");Thread.sleep(500);sendInternal("AT+CMER=3,0,0,1");
-  }catch(Exception e){if(!stop)note("ניסיון חיבור נכשל: "+e.getClass().getSimpleName()+": "+e.getMessage());}
-  finally{if(s!=null&&!connected){try{s.close();}catch(Exception ignored){}}}
- }).start();}
- private void sendInternal(String command)throws IOException{synchronized(connectionLock){if(!connected||output==null)throw new IOException("אין חיבור פעיל");output.write((command+"\r").getBytes(StandardCharsets.US_ASCII));output.flush();}note("נשלח: "+command);}
- private void send(String command){new Thread(()->{try{sendInternal(command);}catch(Exception e){note("שליחה נכשלה: "+e.getMessage());}}).start();}
- private void disconnect(){stop=true;connected=false;synchronized(connectionLock){try{if(socket!=null)socket.close();}catch(Exception ignored){}socket=null;output=null;}note("החיבור נסגר");}
- @Override protected void onDestroy(){disconnect();unregisterReceiver(sdpReceiver);unregisterReceiver(scoReceiver);super.onDestroy();}
+ @Override public void onRequestPermissionsResult(int req,String[] p,int[] g){super.onRequestPermissionsResult(req,p,g);if(req==10&&permitted())refresh();}
+ private void refresh(){if(adapter==null||!permitted()){log("Bluetooth אינו זמין או חסרה הרשאה");return;}paired.clear();ArrayList<String> names=new ArrayList<>();try{for(BluetoothDevice d:adapter.getBondedDevices()){paired.add(d);names.add(d.getName()+" ("+d.getAddress()+")");}}catch(Exception e){log("שגיאת מכשירים: "+e.getMessage());}devices.setAdapter(new ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,names));for(int i=0;i<paired.size();i++)if("4X4".equalsIgnoreCase(paired.get(i).getName())){devices.setSelection(i);break;}log("נמצאו "+paired.size()+" מכשירים מצומדים");}
+ private void connect(int requestId){if(!permitted()){reply(requestId,false,"נדרשת הרשאת Bluetooth");return;}int i=devices.getSelectedItemPosition();if(i<0||i>=paired.size()){reply(requestId,false,"בחר מכשיר מצומד");return;}BluetoothDevice target=paired.get(i);disconnect();stopping=false;log("מתחבר ל-"+target.getName());new Thread(()->{BluetoothSocket s=null;try{if(adapter!=null)adapter.cancelDiscovery();s=target.createRfcommSocketToServiceRecord(HFP);s.connect();if(stopping){s.close();return;}synchronized(lock){socket=s;output=s.getOutputStream();connected=true;}log("Bluetooth HFP מחובר");report();reply(requestId,true,"מחובר");final BluetoothSocket active=s;new Thread(()->read(active)).start();sendRaw("AT+BRSF=0");Thread.sleep(250);sendRaw("AT+CIND=?");Thread.sleep(250);sendRaw("AT+CIND?");Thread.sleep(250);sendRaw("AT+CMER=3,0,0,1");}catch(Exception e){log("חיבור נכשל: "+e.getMessage());reply(requestId,false,"חיבור נכשל: "+e.getMessage());if(s!=null&&!connected)try{s.close();}catch(Exception ignored){}report();}}).start();}
+ private void read(BluetoothSocket s){try{InputStream in=s.getInputStream();byte[] buf=new byte[2048];int n;StringBuilder sb=new StringBuilder();while(!stopping&&(n=in.read(buf))!=-1){sb.append(new String(buf,0,n,StandardCharsets.US_ASCII));int idx;while((idx=sb.indexOf("\n"))>=0){String line=sb.substring(0,idx).trim();sb.delete(0,idx+1);if(!line.isEmpty()){log("HFP: "+line);if(line.startsWith("+CIEV:")){/* indicators are device-specific */}if(line.equals("NO CARRIER")){busy=false;report();}}}}}catch(Exception e){if(!stopping)log("חיבור נותק: "+e.getMessage());}finally{if(!stopping)disconnect();}}
+ private void sendRaw(String cmd)throws IOException{synchronized(lock){if(!connected||output==null)throw new IOException("אין חיבור HFP");output.write((cmd+"\r").getBytes(StandardCharsets.US_ASCII));output.flush();}log("AT: "+cmd.replaceAll("ATD.*;","ATD[מספר מוסתר];"));}
+ private void command(int id,String cmd,String phone){if("status".equals(cmd)){report();return;}if("connect".equals(cmd)){connect(id);return;}if("disconnect".equals(cmd)){disconnect();reply(id,true,"נותק");return;}if("dial".equals(cmd)){if(phone==null||!phone.matches("\\+?[0-9]{3,20}")){reply(id,false,"מספר לא תקין");return;}new Thread(()->{try{sendRaw("ATD"+phone+";");busy=true;report();reply(id,true,"פקודת חיוג נשלחה");}catch(Exception e){reply(id,false,e.getMessage());}}).start();return;}if("hangup".equals(cmd)){new Thread(()->{try{sendRaw("AT+CHUP");busy=false;report();reply(id,true,"פקודת ניתוק נשלחה");}catch(Exception e){reply(id,false,e.getMessage());}}).start();}}
+ private void disconnect(){stopping=true;connected=false;busy=false;synchronized(lock){try{if(socket!=null)socket.close();}catch(Exception ignored){}socket=null;output=null;}report();}
+ public class Bridge{@JavascriptInterface public void command(int id,String action,String value){MainActivity.this.command(id,action,value);}
+  @JavascriptInterface public void exportCsv(String csv){try{String name="KDial_contacts_"+System.currentTimeMillis()+".csv";if(Build.VERSION.SDK_INT>=29){android.content.ContentValues v=new android.content.ContentValues();v.put(android.provider.MediaStore.Downloads.DISPLAY_NAME,name);v.put(android.provider.MediaStore.Downloads.MIME_TYPE,"text/csv");v.put(android.provider.MediaStore.Downloads.RELATIVE_PATH,"Download/");Uri uri=getContentResolver().insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI,v);if(uri==null)throw new IOException("Cannot create download");try(OutputStream o=getContentResolver().openOutputStream(uri)){o.write(csv.getBytes(StandardCharsets.UTF_8));}}else{File dir=getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS);try(FileOutputStream o=new FileOutputStream(new File(dir,name))){o.write(csv.getBytes(StandardCharsets.UTF_8));}}log("CSV נשמר: "+name);}catch(Exception e){log("שגיאת ייצוא CSV: "+e.getMessage());}}
+ }
+ @Override protected void onDestroy(){disconnect();if(web!=null){web.removeJavascriptInterface("KDialAndroid");web.destroy();}super.onDestroy();}
 }
