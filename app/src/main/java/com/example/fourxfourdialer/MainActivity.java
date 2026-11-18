@@ -123,6 +123,21 @@ public class MainActivity extends Activity {
   }
   if(!connected)log("אזהרה: אין חיבור HFP. בדיקת הניתוב תתבצע אך לא תוכל לאמת שמע שיחה");
   audioTesting=true;
+  final BroadcastReceiver scoReceiver=new BroadcastReceiver(){
+   @Override public void onReceive(Context context,Intent intent){
+    int state=intent.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_STATE,-1);
+    int previous=intent.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_PREVIOUS_STATE,-1);
+    log("SCO broadcast: state="+state+" previous="+previous+" (CONNECTED=1, CONNECTING=2, DISCONNECTED=0)");
+   }
+  };
+  boolean receiverRegistered=false;
+  try{
+   IntentFilter filter=new IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED);
+   registerReceiver(scoReceiver,filter);
+   receiverRegistered=true;
+   log("SCO receiver registered");
+  }catch(Exception e){log("SCO receiver error: "+e);}
+  final boolean scoReceiverRegistered=receiverRegistered;
   new Thread(()->{
    int oldMode=audio.getMode();boolean oldSpeaker=audio.isSpeakerphoneOn();boolean oldSco=audio.isBluetoothScoOn();
    AudioDeviceInfo oldComm=Build.VERSION.SDK_INT>=31?audio.getCommunicationDevice():null;
@@ -157,6 +172,7 @@ public class MainActivity extends Activity {
     log("========== בדיקת שמע הסתיימה ==========");
    }catch(Exception e){log("שגיאת בדיקת שמע: "+e);}finally{
     try{audio.stopBluetoothSco();audio.setBluetoothScoOn(oldSco);audio.setSpeakerphoneOn(oldSpeaker);if(Build.VERSION.SDK_INT>=31){audio.clearCommunicationDevice();if(oldComm!=null)audio.setCommunicationDevice(oldComm);}audio.setMode(oldMode);log("הגדרות השמע המקוריות שוחזרו");}catch(Exception e){log("שגיאת שחזור שמע: "+e);}
+    if(scoReceiverRegistered)try{unregisterReceiver(scoReceiver);}catch(Exception ignored){}
     audioTesting=false;ui.post(()->showDiagnostics());
    }
   },"KDial-Audio-Tests").start();
@@ -170,16 +186,21 @@ public class MainActivity extends Activity {
   if(adapter==null){log("אין מתאם Bluetooth");showDiagnostics();return;}
   log("Bluetooth enabled="+adapter.isEnabled()+" RFCOMM connected="+connected+" method="+connectionMethod);
   log("בדיקת HFP Client: פרופיל 16 הוא מזהה Android פנימי; קבלת Proxy אינה הוכחה לניתוב שמע");
+  final java.util.concurrent.atomic.AtomicBoolean hfpCallback=new java.util.concurrent.atomic.AtomicBoolean(false);
   try{
    boolean requested=adapter.getProfileProxy(this,new BluetoothProfile.ServiceListener(){
     @Override public void onServiceConnected(int profile,BluetoothProfile proxy){
+     hfpCallback.set(true);
      log("HFP Client callback CONNECTED profile="+profile+" class="+proxy.getClass().getName());
      try{log("HFP Client connected devices="+proxy.getConnectedDevices().size());for(BluetoothDevice d:proxy.getConnectedDevices())log("HFP Client device="+d.getName()+" "+d.getAddress());}catch(Exception e){log("HFP Client device read error="+e);}
      try{adapter.closeProfileProxy(profile,proxy);}catch(Exception e){log("HFP Client close error="+e);}
     }
-    @Override public void onServiceDisconnected(int profile){log("HFP Client callback DISCONNECTED profile="+profile);}
+    @Override public void onServiceDisconnected(int profile){hfpCallback.set(true);log("HFP Client callback DISCONNECTED profile="+profile);}
    },16);
    log("HFP Client getProfileProxy(16) request="+requested+" (callback may arrive later)");
+   ui.postDelayed(()->{
+    if(!hfpCallback.get())log("HFP Client: no service callback after 8 seconds; support cannot be confirmed");
+   },8000);
   }catch(Throwable e){log("HFP Client access failed="+e.getClass().getSimpleName()+": "+e.getMessage());}
   try{
    for(BluetoothDevice d:adapter.getBondedDevices()){
