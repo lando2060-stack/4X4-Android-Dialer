@@ -51,6 +51,7 @@ public class MainActivity extends Activity {
   web.setWebChromeClient(new WebChromeClient(){@Override public boolean onShowFileChooser(WebView v,ValueCallback<Uri[]> cb,FileChooserParams params){if(uploadCallback!=null)uploadCallback.onReceiveValue(null);uploadCallback=cb;try{startActivityForResult(params.createIntent(),1001);return true;}catch(Exception e){uploadCallback=null;return false;}}});
   root.addView(web,new LinearLayout.LayoutParams(-1,0,1));
   Button audioButton=new Button(this);audioButton.setText("בדיקת כל אפשרויות השמע | SCO, ניתוב ומיקרופון");audioButton.setAllCaps(false);audioButton.setOnClickListener(v->startAudioTests());root.addView(audioButton,new LinearLayout.LayoutParams(-1,-2));
+  Button advancedButton=new Button(this);advancedButton.setText("אבחון Bluetooth מתקדם | HFP Client ופרופילים");advancedButton.setAllCaps(false);advancedButton.setOnClickListener(v->runAdvancedBluetoothDiagnostics());root.addView(advancedButton,new LinearLayout.LayoutParams(-1,-2));
   Button diagnosticsButton=new Button(this);diagnosticsButton.setText("יומן חיבור Bluetooth | הצג הצלחות ושגיאות");diagnosticsButton.setAllCaps(false);diagnosticsButton.setOnClickListener(v->showDiagnostics());root.addView(diagnosticsButton,new LinearLayout.LayoutParams(-1,-2));setContentView(root);
   web.loadUrl("file:///android_asset/index.html");
   if(Build.VERSION.SDK_INT>=31&&!permitted())requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT},10);else refresh();
@@ -159,6 +160,44 @@ public class MainActivity extends Activity {
     audioTesting=false;ui.post(()->showDiagnostics());
    }
   },"KDial-Audio-Tests").start();
+ }
+ private void runAdvancedBluetoothDiagnostics(){
+  log("========== אבחון Bluetooth מתקדם ==========");
+  log("מכשיר="+Build.MANUFACTURER+" "+Build.MODEL+" Android="+Build.VERSION.RELEASE+" API="+Build.VERSION.SDK_INT);
+  log("הרשאת BLUETOOTH_CONNECT="+(Build.VERSION.SDK_INT<31||checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)==PackageManager.PERMISSION_GRANTED));
+  log("הרשאת BLUETOOTH_SCAN="+(Build.VERSION.SDK_INT<31||checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)==PackageManager.PERMISSION_GRANTED));
+  log("הרשאת RECORD_AUDIO="+(Build.VERSION.SDK_INT<23||checkSelfPermission(Manifest.permission.RECORD_AUDIO)==PackageManager.PERMISSION_GRANTED));
+  if(adapter==null){log("אין מתאם Bluetooth");showDiagnostics();return;}
+  log("Bluetooth enabled="+adapter.isEnabled()+" RFCOMM connected="+connected+" method="+connectionMethod);
+  log("בדיקת HFP Client: פרופיל 16 הוא מזהה Android פנימי; קבלת Proxy אינה הוכחה לניתוב שמע");
+  try{
+   boolean requested=adapter.getProfileProxy(this,new BluetoothProfile.ServiceListener(){
+    @Override public void onServiceConnected(int profile,BluetoothProfile proxy){
+     log("HFP Client callback CONNECTED profile="+profile+" class="+proxy.getClass().getName());
+     try{log("HFP Client connected devices="+proxy.getConnectedDevices().size());for(BluetoothDevice d:proxy.getConnectedDevices())log("HFP Client device="+d.getName()+" "+d.getAddress());}catch(Exception e){log("HFP Client device read error="+e);}
+     try{adapter.closeProfileProxy(profile,proxy);}catch(Exception e){log("HFP Client close error="+e);}
+    }
+    @Override public void onServiceDisconnected(int profile){log("HFP Client callback DISCONNECTED profile="+profile);}
+   },16);
+   log("HFP Client getProfileProxy(16) request="+requested+" (callback may arrive later)");
+  }catch(Throwable e){log("HFP Client access failed="+e.getClass().getSimpleName()+": "+e.getMessage());}
+  try{
+   for(BluetoothDevice d:adapter.getBondedDevices()){
+    if(!"4X4".equalsIgnoreCase(d.getName())&&!"4C:11:54:B2:9E:38".equalsIgnoreCase(d.getAddress()))continue;
+    log("Target="+d.getName()+" bond="+d.getBondState()+" type="+d.getType());
+    android.os.ParcelUuid[] uuids=d.getUuids();
+    if(uuids==null)log("Target UUIDs: null (not necessarily unsupported)");
+    else for(android.os.ParcelUuid u:uuids)log("Target UUID="+u.toString());
+   }
+  }catch(Throwable e){log("Target UUID read failed="+e);}
+  try{audioSnapshot("אבחון מתקדם (ללא שינוי ניתוב)");}catch(Throwable e){log("Audio snapshot failed="+e);}
+  try{
+   PackageManager pm=getPackageManager();
+   log("Feature bluetooth="+pm.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH));
+   log("Feature bluetooth_le="+pm.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE));
+  }catch(Throwable e){log("Feature check failed="+e);}
+  log("========== אבחון ראשוני הסתיים; המתן 3 שניות לתשובת HFP Client ==========");
+  ui.postDelayed(()->showDiagnostics(),3000);
  }
  private void sendRaw(String cmd)throws IOException{synchronized(lock){if(!connected||output==null)throw new IOException("אין חיבור HFP");output.write((cmd+"\r").getBytes(StandardCharsets.US_ASCII));output.flush();}log("AT: "+cmd.replaceAll("ATD.*;","ATD[מספר מוסתר];"));}
  private void command(int id,String cmd,String phone){if("status".equals(cmd)){report();publishDevices();return;}if("refresh".equals(cmd)){ui.post(()->{refresh();reply(id,true,"רשימת מכשירים עודכנה");});return;}if("connectSelected".equals(cmd)){try{int selectedIndex=Integer.parseInt(phone);ui.post(()->connectSelected(id,selectedIndex));}catch(Exception e){reply(id,false,"בחירה לא תקינה");}return;}if("connect".equals(cmd)){connect(id);return;}if("disconnect".equals(cmd)){disconnect();reply(id,true,"נותק");return;}if("dial".equals(cmd)){if(phone==null||!phone.matches("\\+?[0-9]{3,20}")){reply(id,false,"מספר לא תקין");return;}new Thread(()->{try{sendRaw("ATD"+phone+";");busy=true;report();reply(id,true,"פקודת חיוג נשלחה");}catch(Exception e){reply(id,false,e.getMessage());}}).start();return;}if("hangup".equals(cmd)){new Thread(()->{try{sendRaw("AT+CHUP");busy=false;report();reply(id,true,"פקודת ניתוק נשלחה");}catch(Exception e){reply(id,false,e.getMessage());}}).start();}}
